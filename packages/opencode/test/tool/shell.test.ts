@@ -37,6 +37,7 @@ const shellLayer = Layer.mergeAll(
   testInstanceStoreLayer,
 )
 const it = testEffect(shellLayer)
+const liveNvx = process.env.OPENCODE_TEST_NVX_BUNDLE ? it.live : it.live.skip
 type ShellTestServices =
   | (typeof shellLayer extends Layer.Layer<infer ROut, infer _E, infer _RIn> ? ROut : never)
   | InstanceStore.Service
@@ -216,6 +217,53 @@ describe("tool.shell", () => {
         }),
       )
     }),
+  )
+
+  it.live("describes NVX-backed shell execution when configured", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped({
+        config: {
+          sandbox: {
+            backend: "nvx",
+            path: "/missing/nvx",
+            cpus: false,
+          },
+        },
+      })
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const shell = yield* initShell()
+          expect(shell.description).toContain("persistent NVX microVM")
+          expect(shell.description).toContain("OS: linux")
+        }),
+      )
+    }),
+  )
+
+  liveNvx(
+    "runs a writable command through NVX",
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped({
+        config: {
+          sandbox: {
+            backend: "nvx",
+            path: process.env.OPENCODE_TEST_NVX_BUNDLE!,
+            snapshot: false,
+          },
+        },
+      })
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const result = yield* run({ command: "printf 'legacy-ok' > nvx-result.txt && id -u" })
+          expect(result.metadata.exit).toBe(0)
+          expect(result.output.trim()).toBe(String(process.getuid?.()))
+          expect(yield* FSUtil.use.readFileString(path.join(tmp, "nvx-result.txt"))).toBe("legacy-ok")
+        }),
+      )
+    }),
+    30_000,
   )
 })
 

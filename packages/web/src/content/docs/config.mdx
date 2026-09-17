@@ -341,6 +341,70 @@ If not specified, OpenCode will automatically discover and use a sensible defaul
 
 ---
 
+### Sandbox
+
+You can run shell tool calls inside a persistent [NVX](https://github.com/microsoft/nvx) microVM instead of directly on the host.
+
+First download or build NVX. The `path` can point to either an extracted NVX release (containing `bin/openvmm` and `guest/`) or an NVX checkout after running `python3 scripts/nvx.py download`.
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "sandbox": {
+    "backend": "nvx",
+    "path": "/opt/nvx-0.1.0-linux-kvm",
+    "memory_mib": 128,
+    "processors": 1
+  }
+}
+```
+
+OpenCode boots the VM lazily on the first shell call, keeps it warm for later calls in the same location, and stops it when the location is disposed. The active location is exported read-write through NVX virtio-fs. On Linux, OpenCode creates a cached derived initramfs with a non-root guest identity matching the configured or current host UID/GID so files keep their host ownership.
+
+Snapshot restore is enabled by default. On the first execution for a compatible NVX, host, network, identity, and mount configuration, OpenCode boots an empty managed guest, attaches the host workspace, captures a generic snapshot before any user command accesses it, and immediately restores it to run the first command. Virtio-fs contents are not stored in the snapshot, but the template is bound to the same canonical host path, guest target, mode, and filesystem identity. Later runtimes restore that snapshot with fresh entropy and a fresh control capability. Set `"snapshot": false` to use cold boot for every new runtime.
+
+Generic snapshots are stored under the OpenCode cache directory. Changes to the NVX artifacts, host CPU identity, hypervisor, memory, processor count, network policy, workload identity, or Linux guest mount path select a new compatibility key; older entries remain ordinary cache data until the OpenCode cache is cleared. A failed restore removes its cached snapshot so the next execution rebuilds it. NVX records the exact control-listener identity in the snapshot, so only one live runtime may use a given generic snapshot at a time; a second concurrent OpenCode process using the same snapshot fails explicitly instead of replacing the active listener.
+
+The stock NVX initramfs is intentionally minimal. It includes BusyBox and the NVX lifecycle tools, but not a full development toolchain. Use `initramfs` to select an NVX-compatible custom guest artifact when commands require Git, language runtimes, compilers, or other tools:
+
+```json title="opencode.json"
+{
+  "sandbox": {
+    "backend": "nvx",
+    "path": "/opt/nvx",
+    "initramfs": "guest/initramfs-dev.cpio.gz"
+  }
+}
+```
+
+Custom initramfs artifacts must retain NVX's standard `/init` host-mount hook so OpenCode can install the generic snapshot handoff.
+
+Paths in `openvmm`, `kernel`, and `initramfs` are resolved relative to `path`. `mount` may select an ancestor of the active location when a monorepo or toolchain needs a wider host export; it defaults to the active location. No network device is attached by default.
+
+`hypervisor` defaults to `kvm` on Linux and `whp` on Windows; Linux also supports `mshv`. Use `shell` to select a guest shell other than `/bin/sh`, `startup_timeout` to change the 10-second VM readiness deadline, and `uid`/`gid` when the mounted files should use a non-default host identity. Host environment variables are not forwarded automatically: `pass_env` names variables to copy from the resolved shell environment, while `environment` supplies explicit guest values.
+
+The default launch follows NVX's repository benchmark profile: one vCPU, 128 MiB RAM, Linux affinity to one logical CPU per physical core with two additional host CPUs reserved, OpenVMM logging disabled, and the combined NVX kernel tuning set. That tuning includes `nokaslr` and `mitigations=off`; set `performance_tuning` to `false` when guest-internal hardening is more important than matching the NVX benchmark profile. Set `cpus` to `false` to disable Linux CPU affinity, or provide a taskset CPU list such as `"0,2,4"`.
+
+Networking is opt-in and uses NVX's portable in-process network backend. Egress and host loopback default to `deny`:
+
+```json title="opencode.json"
+{
+  "sandbox": {
+    "backend": "nvx",
+    "path": "/opt/nvx",
+    "network": {
+      "address": "10.0.0.2/24",
+      "egress": "deny",
+      "allow": ["140.82.112.0/20:tcp:443"]
+    }
+  }
+}
+```
+
+NVX managed execution is sequential and currently supports at most 64 arguments, 4096 bytes per argument, and 1 MiB of command output. Interactive stdin is not available. Cancelling an active command terminates the VM to guarantee the guest process is stopped; the next shell call boots a fresh VM.
+
+---
+
 ### Tools
 
 You can manage the tools an LLM can use through the `tools` option.

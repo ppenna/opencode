@@ -7,9 +7,11 @@ import { ChildProcess } from "effect/unstable/process"
 import { Config } from "../config"
 import { makeLocationNode } from "../effect/app-node"
 import { FSUtil } from "../fs-util"
+import { Location } from "../location"
 import { LocationMutation } from "../location-mutation"
 import { AppProcess } from "../process"
 import { PermissionV2 } from "../permission"
+import { NvxSandbox } from "../sandbox/nvx"
 import { PositiveInt } from "../schema"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
@@ -102,11 +104,27 @@ const layer = Layer.effectDiscard(
     const appProcess = yield* AppProcess.Service
     const config = yield* Config.Service
     const permission = yield* PermissionV2.Service
+    const location = yield* Location.Service
+    const settings = Object.assign(
+      {},
+      ...(yield* config.entries()).flatMap((entry) => (entry.type === "document" ? [entry.info] : [])),
+    )
+    const sandbox = settings.sandbox && settings.sandbox !== false ? settings.sandbox : undefined
+    const sandboxRuntime = sandbox
+      ? yield* NvxSandbox.create({
+          config: sandbox,
+          directory: location.directory,
+          fs,
+        })
+      : undefined
+    const shell = sandbox?.shell ?? settings.shell ?? defaultShell()
 
     yield* tools
       .register({
         [name]: Tool.make({
-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
+          description: sandbox
+            ? `Execute one shell command string inside a persistent NVX microVM. The configured host mount is exposed read-write through virtio-fs; other host paths, processes, and networks are unavailable unless explicitly configured. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval and must also be inside the NVX mount. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses ${shell} inside the Linux guest.`
+            : `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
           input: Input,
           output: Output,
           structured: StructuredOutput,
@@ -137,7 +155,9 @@ const layer = Layer.effectDiscard(
                 })
               const warnings = (yield* externalCommandDirectories(fs, input.command, target.canonical)).map(
                 (directory) =>
-                  `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.`,
+                  sandbox
+                    ? `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. NVX exposes only its configured mount, so this path may be unavailable.`
+                    : `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.`,
               )
               yield* permission.assert({
                 action: name,
@@ -151,10 +171,6 @@ const layer = Layer.effectDiscard(
               if ((yield* fs.stat(target.canonical)).type !== "Directory")
                 return yield* Effect.fail(new Error(`Working directory is not a directory: ${target.canonical}`))
 
-              const entries = yield* config.entries()
-              const shell =
-                Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
-                  .shell ?? defaultShell()
               const command = ChildProcess.make(input.command, [], {
                 cwd: target.canonical,
                 shell,
@@ -163,17 +179,33 @@ const layer = Layer.effectDiscard(
                 forceKillAfter: Duration.seconds(3),
               })
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
-              const result = yield* appProcess
-                .run(command, {
-                  combineOutput: true,
-                  timeout: Duration.millis(timeout),
-                  maxOutputBytes: MAX_CAPTURE_BYTES,
-                })
-                .pipe(
-                  Effect.catchTag("AppProcessError", (error) =>
-                    isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
-                  ),
-                )
+              const result = sandboxRuntime
+                ? yield* Effect.gen(function* () {
+                    const chunks: Uint8Array[] = []
+                    const result = yield* sandboxRuntime.execute(command, {
+                      timeoutMs: timeout,
+                      output: (_channel, chunk) => {
+                        chunks.push(chunk)
+                      },
+                    })
+                    if (result.category === "timeout" || result.category === "aborted") return undefined
+                    return {
+                      exitCode: result.exitCode ?? 125,
+                      output: Buffer.concat(chunks),
+                      outputTruncated: result.category === "output-limit",
+                    }
+                  })
+                : yield* appProcess
+                    .run(command, {
+                      combineOutput: true,
+                      timeout: Duration.millis(timeout),
+                      maxOutputBytes: MAX_CAPTURE_BYTES,
+                    })
+                    .pipe(
+                      Effect.catchTag("AppProcessError", (error) =>
+                        isTimeout(error) ? Effect.succeed(undefined) : Effect.fail(error),
+                      ),
+                    )
               if (!result) {
                 return {
                   output: `Command exceeded timeout of ${timeout} ms. Retry with a larger timeout if the command is expected to take longer.`,
@@ -203,5 +235,13 @@ const layer = Layer.effectDiscard(
 export const node = makeLocationNode({
   name: "tool/bash",
   layer,
-  deps: [ToolRegistry.node, LocationMutation.node, FSUtil.node, AppProcess.node, Config.node, PermissionV2.node],
+  deps: [
+    ToolRegistry.node,
+    Location.node,
+    LocationMutation.node,
+    FSUtil.node,
+    AppProcess.node,
+    Config.node,
+    PermissionV2.node,
+  ],
 })

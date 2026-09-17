@@ -6,6 +6,7 @@ import { Effect, Layer } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Config } from "@opencode-ai/core/config"
+import { ConfigSandbox } from "@opencode-ai/core/config/sandbox"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Location } from "@opencode-ai/core/location"
@@ -101,6 +102,7 @@ const withTool = <A, E, R>(
   directory: string,
   body: (registry: ToolRegistry.Interface) => Effect.Effect<A, E, R>,
   processLayer: Layer.Layer<AppProcess.Service> = appProcess,
+  configLayer: Layer.Layer<Config.Service> = config,
 ) => {
   const activeLocation = Layer.succeed(
     Location.Service,
@@ -116,7 +118,7 @@ const withTool = <A, E, R>(
           [Location.node, activeLocation],
           [PermissionV2.node, permission],
           [AppProcess.node, processLayer],
-          [Config.node, config],
+          [Config.node, configLayer],
           [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
         ],
       ),
@@ -131,8 +133,85 @@ const call = (input: typeof BashTool.Input.Type, id = "call-bash") => ({
 })
 
 const it = testEffect(Layer.empty)
+const liveNvx = process.env.OPENCODE_TEST_NVX_BUNDLE ? it.live : it.live.skip
 
 describe("BashTool", () => {
+  it.live("describes NVX-backed execution when configured", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        withTool(
+          tmp.path,
+          (registry) =>
+            Effect.gen(function* () {
+              const definitions = yield* toolDefinitions(registry)
+              expect(definitions[0]?.description).toContain("persistent NVX microVM")
+              expect(definitions[0]?.description).toContain("/bin/sh")
+            }),
+          appProcess,
+          Layer.succeed(
+            Config.Service,
+            Config.Service.of({
+              entries: () =>
+                Effect.succeed([
+                  new Config.Document({
+                    type: "document",
+                    info: new Config.Info({
+                      sandbox: new ConfigSandbox.Nvx({
+                        backend: "nvx",
+                        path: "/missing/nvx",
+                        cpus: false,
+                      }),
+                    }),
+                  }),
+                ]),
+            }),
+          ),
+        ),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  liveNvx(
+    "executes a writable command through NVX",
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        withTool(
+          tmp.path,
+          (registry) =>
+            Effect.gen(function* () {
+              const result = yield* executeTool(registry, call({ command: "printf 'v2-ok' > nvx-result.txt && id -u" }))
+              expect(JSON.stringify(result)).toContain(`${process.getuid?.()}\\n`)
+              expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nvx-result.txt"), "utf8"))).toBe(
+                "v2-ok",
+              )
+            }),
+          appProcess,
+          Layer.succeed(
+            Config.Service,
+            Config.Service.of({
+              entries: () =>
+                Effect.succeed([
+                  new Config.Document({
+                    type: "document",
+                    info: new Config.Info({
+                      sandbox: new ConfigSandbox.Nvx({
+                        backend: "nvx",
+                        path: process.env.OPENCODE_TEST_NVX_BUNDLE!,
+                        snapshot: false,
+                      }),
+                    }),
+                  }),
+                ]),
+            }),
+          ),
+        ),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+    30_000,
+  )
+
   it.live("registers and returns structured successful output from the active Location", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

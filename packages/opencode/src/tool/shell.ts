@@ -13,6 +13,8 @@ import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
+import { NvxSandbox } from "@opencode-ai/core/sandbox/nvx"
+import { EffectBridge } from "@/effect/bridge"
 import { ShellID } from "./shell/id"
 
 import * as Truncate from "./truncate"
@@ -345,6 +347,24 @@ export const ShellTool = Tool.define(
     const plugin = yield* Plugin.Service
     const flags = yield* RuntimeFlags.Service
     const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
+    const sandboxState = yield* InstanceState.make(
+      Effect.fn("ShellTool.sandbox")(function* (ctx) {
+        const cfg = yield* config.get()
+        const sandbox = cfg.sandbox === false ? undefined : cfg.sandbox
+        return {
+          cfg,
+          ctx,
+          sandbox,
+          executor: sandbox
+            ? yield* NvxSandbox.create({
+                config: sandbox,
+                directory: ctx.directory,
+                fs,
+              })
+            : undefined,
+        }
+      }),
+    )
 
     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
       const lines = yield* spawner
@@ -432,6 +452,7 @@ export const ShellTool = Tool.define(
         cwd: string
         env: NodeJS.ProcessEnv
         timeout: number
+        sandbox?: NvxSandbox.Interface
       },
       ctx: Tool.Context,
     ) {
@@ -446,6 +467,7 @@ export const ShellTool = Tool.define(
       let cut = false
       let expired = false
       let aborted = false
+      let outputLimited = false
 
       const closeSink = Effect.fnUntraced(function* () {
         const stream = sink
@@ -478,57 +500,77 @@ export const ShellTool = Tool.define(
         },
       })
 
+      const consume = Effect.fnUntraced(function* (chunk: string) {
+        const size = Buffer.byteLength(chunk, "utf-8")
+        list.push({ text: chunk, size })
+        used += size
+        while (used > keep && list.length > 1) {
+          const item = list.shift()
+          if (!item) break
+          used -= item.size
+          cut = true
+        }
+
+        last = preview(last + chunk)
+
+        if (file) {
+          sink?.write(chunk)
+        } else {
+          full += chunk
+          if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
+            yield* trunc.write(full).pipe(
+              Effect.andThen((next) =>
+                Effect.sync(() => {
+                  file = next
+                  cut = true
+                  sink = createWriteStream(next, { flags: "a" })
+                  full = ""
+                }),
+              ),
+              Effect.andThen(
+                ctx.metadata({
+                  metadata: {
+                    output: last,
+                  },
+                }),
+              ),
+            )
+            return
+          }
+        }
+
+        yield* ctx.metadata({
+          metadata: {
+            output: last,
+          },
+        })
+      })
+
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
+          if (input.sandbox) {
+            const bridge = yield* EffectBridge.make()
+            const decoder = new TextDecoder()
+            const result = yield* input.sandbox.execute(cmd(input.shell, input.command, input.cwd, input.env), {
+              timeoutMs: input.timeout,
+              signal: ctx.abort,
+              output: (_channel, chunk) => {
+                const text = decoder.decode(chunk, { stream: true })
+                return text ? bridge.promise(consume(text)) : Promise.resolve()
+              },
+            })
+            const remaining = decoder.decode()
+            if (remaining) yield* consume(remaining)
+            if (result.category === "timeout") expired = true
+            if (result.category === "aborted") aborted = true
+            if (result.category === "output-limit") outputLimited = true
+            return result.category === "timeout" || result.category === "aborted" ? null : result.exitCode
+          }
+
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
 
-          yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-              const size = Buffer.byteLength(chunk, "utf-8")
-              list.push({ text: chunk, size })
-              used += size
-              while (used > keep && list.length > 1) {
-                const item = list.shift()
-                if (!item) break
-                used -= item.size
-                cut = true
-              }
-
-              last = preview(last + chunk)
-
-              if (file) {
-                sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                        },
-                      }),
-                    ),
-                  )
-                }
-              }
-
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                },
-              })
-            }),
-          )
+          yield* Effect.forkScoped(Stream.runForEach(Stream.decodeText(handle.all), consume))
 
           const abort = Effect.callback<void>((resume) => {
             if (ctx.abort.aborted) return resume(Effect.void)
@@ -565,6 +607,7 @@ export const ShellTool = Tool.define(
         )
       }
       if (aborted) meta.push("User aborted the command")
+      if (outputLimited) meta.push(`NVX terminated the command after ${1024 * 1024} bytes of output`)
       const raw = list.map((item) => item.text).join("")
       const end = tail(raw, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
@@ -596,22 +639,23 @@ export const ShellTool = Tool.define(
 
     return () =>
       Effect.gen(function* () {
-        const cfg = yield* config.get()
-        const shell = Shell.acceptable(cfg.shell)
+        const runtime = yield* InstanceState.get(sandboxState)
+        const shell = runtime.sandbox?.shell ?? Shell.acceptable(runtime.cfg.shell)
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
-        const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
-        yield* Effect.logInfo("shell tool using shell", { shell })
+        const prompt = ShellPrompt.render(name, runtime.sandbox ? "linux" : process.platform, limits, defaultTimeoutMs)
+        yield* Effect.logInfo("shell tool using shell", { shell, sandbox: runtime.sandbox?.backend })
 
         return {
-          description: prompt.description,
+          description: runtime.sandbox
+            ? `${prompt.description}\n\nCommands execute inside a persistent NVX microVM. Only the configured host mount is visible to the guest, and the guest environment may not contain host-installed tools.`
+            : prompt.description,
           parameters: prompt.parameters,
           execute: (params: Parameters, ctx: Tool.Context) =>
             Effect.gen(function* () {
-              const instanceCtx = yield* InstanceState.context
               const cwd = params.workdir
-                ? yield* resolvePath(params.workdir, instanceCtx.directory, shell)
-                : instanceCtx.directory
+                ? yield* resolvePath(params.workdir, runtime.ctx.directory, shell)
+                : runtime.ctx.directory
               if (params.timeout !== undefined && params.timeout < 0) {
                 throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
               }
@@ -622,8 +666,8 @@ export const ShellTool = Tool.define(
                   const tree = yield* Effect.acquireRelease(parse(params.command, ps), (tree) =>
                     Effect.sync(() => tree.delete()),
                   )
-                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, instanceCtx)
-                  if (!containsPath(cwd, instanceCtx)) scan.dirs.add(cwd)
+                  const scan = yield* collect(tree.rootNode, cwd, ps, shell, runtime.ctx)
+                  if (!containsPath(cwd, runtime.ctx)) scan.dirs.add(cwd)
                   yield* ask(ctx, scan, params)
                 }),
               )
@@ -635,6 +679,7 @@ export const ShellTool = Tool.define(
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
+                  sandbox: runtime.executor,
                 },
                 ctx,
               )
