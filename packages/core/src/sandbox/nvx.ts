@@ -168,11 +168,7 @@ export const create = Effect.fn("NvxSandbox.create")(function* (input: {
     yield* input.fs.makeDirectory(stateDir, { recursive: true, mode: 0o700 })
     if (process.platform !== "win32") yield* input.fs.chmod(stateDir, 0o700)
 
-    const endpoint = template
-      ? template.endpoint
-      : process.platform === "win32"
-        ? `//./pipe/openvmm-microvm-${id.replaceAll("-", "")}`
-        : path.join(stateDir, "control.sock")
+    const endpoint = template ? template.endpoint : controlEndpoint(stateDir, id)
     if (template && process.platform !== "win32") {
       yield* input.fs.makeDirectory(path.dirname(endpoint), { recursive: true, mode: 0o700 })
       yield* input.fs.chmod(path.dirname(endpoint), 0o700)
@@ -553,7 +549,7 @@ const snapshotTemplate = Effect.fn("NvxSandbox.snapshotTemplate")(function* (inp
     .digest("hex")
   const id = key.slice(0, 24)
   const root = path.join(Global.Path.cache, "nvx", "snapshots", id)
-  const endpoint = process.platform === "win32" ? `//./pipe/opencode-nvx-${id}` : path.join(root, "control.sock")
+  const endpoint = controlEndpoint(root, id)
   return {
     root,
     snapshot: path.join(root, "snapshot"),
@@ -728,9 +724,9 @@ const captureSnapshot = Effect.fn("NvxSandbox.captureSnapshot")(function* (input
   readonly gid: number
   readonly template: SnapshotTemplate
 }) {
-  const endpointDir = path.dirname(input.template.endpoint)
-  yield* input.fs.makeDirectory(endpointDir, { recursive: true, mode: 0o700 })
   if (process.platform !== "win32") {
+    const endpointDir = path.dirname(input.template.endpoint)
+    yield* input.fs.makeDirectory(endpointDir, { recursive: true, mode: 0o700 })
     yield* input.fs.chmod(endpointDir, 0o700)
     yield* input.fs.remove(input.template.endpoint, { force: true }).pipe(Effect.ignore)
   }
@@ -926,6 +922,11 @@ function defaultIdentity(kind: "uid" | "gid") {
   const value = kind === "uid" ? process.getuid?.() : process.getgid?.()
   if (!value) throw new Error(`NVX requires a non-root ${kind}; configure sandbox.${kind} explicitly`)
   return value
+}
+
+function controlEndpoint(root: string, id: string) {
+  if (process.platform === "win32") return `//./pipe/openvmm-microvm-${id.replaceAll("-", "")}`
+  return path.join(root, "control.sock")
 }
 
 function clientCall<A>(fn: (signal: AbortSignal) => Promise<A>) {

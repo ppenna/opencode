@@ -223,7 +223,7 @@ liveNvx(
         )
 
         expect(result.exitCode).toBe(0)
-        expect(result.output.toString().trim()).toBe(String(process.getuid?.()))
+        expect(result.output.toString().trim()).toBe(String(process.platform === "win32" ? 65534 : process.getuid?.()))
         expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "result.txt"), "utf8"))).toBe("sandbox-ok")
         expect((yield* runSandbox(sandbox, directory, "cat /tmp/opencode-nvx-state")).output.toString()).toBe("warm")
         expect((yield* runSandbox(sandbox, directory, ":")).output.toString()).toBe("")

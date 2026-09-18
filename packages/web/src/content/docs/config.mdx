@@ -345,7 +345,7 @@ If not specified, OpenCode will automatically discover and use a sensible defaul
 
 You can run shell tool calls inside a persistent [NVX](https://github.com/microsoft/nvx) microVM instead of directly on the host.
 
-First download or build NVX. The `path` can point to either an extracted NVX release (containing `bin/openvmm` and `guest/`) or an NVX checkout after running `python3 scripts/nvx.py download`.
+First download or build NVX. The `path` can point to either an extracted NVX release (containing `bin/openvmm` or `bin/openvmm.exe` and `guest/`) or an NVX checkout after running `python3 scripts/nvx.py download` on Linux or `python scripts\nvx.py download` on Windows.
 
 ```json title="opencode.json"
 {
@@ -359,11 +359,22 @@ First download or build NVX. The `path` can point to either an extracted NVX rel
 }
 ```
 
-OpenCode boots the VM lazily on the first shell call, keeps it warm for later calls in the same location, and stops it when the location is disposed. The active location is exported read-write through NVX virtio-fs. On Linux, OpenCode creates a cached derived initramfs with a non-root guest identity matching the configured or current host UID/GID so files keep their host ownership.
+On Windows, use the corresponding `windows-whp` release or checkout:
+
+```json title="opencode.json"
+{
+  "sandbox": {
+    "backend": "nvx",
+    "path": "C:\\tools\\nvx-0.1.0-windows-whp"
+  }
+}
+```
+
+OpenCode boots the VM lazily on the first shell call, keeps it warm for later calls in the same location, and stops it when the location is disposed. The active location is exported read-write through NVX virtio-fs. On Linux, OpenCode creates a cached derived initramfs with a non-root guest identity matching the configured or current host UID/GID so files keep their host ownership. Windows defaults to NVX's `65534:65534` guest identity; set `uid` and `gid` to override it.
 
 Snapshot restore is enabled by default. On the first execution for a compatible NVX, host, network, identity, and mount configuration, OpenCode boots an empty managed guest, attaches the host workspace, captures a generic snapshot before any user command accesses it, and immediately restores it to run the first command. Virtio-fs contents are not stored in the snapshot, but the template is bound to the same canonical host path, guest target, mode, and filesystem identity. Later runtimes restore that snapshot with fresh entropy and a fresh control capability. Set `"snapshot": false` to use cold boot for every new runtime.
 
-Generic snapshots are stored under the OpenCode cache directory. Changes to the NVX artifacts, host CPU identity, hypervisor, memory, processor count, network policy, workload identity, or Linux guest mount path select a new compatibility key; older entries remain ordinary cache data until the OpenCode cache is cleared. A failed restore removes its cached snapshot so the next execution rebuilds it. NVX records the exact control-listener identity in the snapshot, so only one live runtime may use a given generic snapshot at a time; a second concurrent OpenCode process using the same snapshot fails explicitly instead of replacing the active listener.
+Generic snapshots are stored under the OpenCode cache directory. Changes to the NVX artifacts, host CPU identity, hypervisor, memory, processor count, network policy, workload identity, or guest mount path select a new compatibility key; older entries remain ordinary cache data until the OpenCode cache is cleared. A failed restore removes its cached snapshot so the next execution rebuilds it. NVX records the exact control-listener identity in the snapshot, so only one live runtime may use a given generic snapshot at a time; a second concurrent OpenCode process using the same snapshot fails explicitly instead of replacing the active listener.
 
 The stock NVX initramfs is intentionally minimal. It includes BusyBox and the NVX lifecycle tools, but not a full development toolchain. Use `initramfs` to select an NVX-compatible custom guest artifact when commands require Git, language runtimes, compilers, or other tools:
 

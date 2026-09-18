@@ -182,7 +182,9 @@ describe("BashTool", () => {
           (registry) =>
             Effect.gen(function* () {
               const result = yield* executeTool(registry, call({ command: "printf 'v2-ok' > nvx-result.txt && id -u" }))
-              expect(JSON.stringify(result)).toContain(`${process.getuid?.()}\\n`)
+              expect(JSON.stringify(result)).toContain(
+                `${process.platform === "win32" ? 65534 : process.getuid?.()}\\n`,
+              )
               expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "nvx-result.txt"), "utf8"))).toBe(
                 "v2-ok",
               )

@@ -117,7 +117,7 @@ const layer = Layer.effectDiscard(
           fs,
         })
       : undefined
-    const shell = sandbox?.shell ?? settings.shell ?? defaultShell()
+    const shell = sandbox ? (sandbox.shell ?? "/bin/sh") : (settings.shell ?? defaultShell())
 
     yield* tools
       .register({

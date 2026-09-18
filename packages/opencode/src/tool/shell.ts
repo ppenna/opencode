@@ -640,7 +640,7 @@ export const ShellTool = Tool.define(
     return () =>
       Effect.gen(function* () {
         const runtime = yield* InstanceState.get(sandboxState)
-        const shell = runtime.sandbox?.shell ?? Shell.acceptable(runtime.cfg.shell)
+        const shell = runtime.sandbox ? (runtime.sandbox.shell ?? "/bin/sh") : Shell.acceptable(runtime.cfg.shell)
         const name = Shell.name(shell)
         const limits = yield* trunc.limits()
         const prompt = ShellPrompt.render(name, runtime.sandbox ? "linux" : process.platform, limits, defaultTimeoutMs)

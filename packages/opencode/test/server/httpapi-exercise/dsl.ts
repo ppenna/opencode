@@ -203,8 +203,8 @@ export function route(template: string, params: Record<string, string>) {
 
 export function controlledPtyInput(title: string | undefined) {
   return {
-    command: "/bin/sh",
-    args: ["-c", "sleep 30"],
+    command: process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/sh",
+    args: process.platform === "win32" ? ["/d", "/s", "/c", "ping -n 31 127.0.0.1 >nul"] : ["-c", "sleep 30"],
     ...(title ? { title } : {}),
   }
 }

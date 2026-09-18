@@ -258,7 +258,7 @@ describe("tool.shell", () => {
         Effect.gen(function* () {
           const result = yield* run({ command: "printf 'legacy-ok' > nvx-result.txt && id -u" })
           expect(result.metadata.exit).toBe(0)
-          expect(result.output.trim()).toBe(String(process.getuid?.()))
+          expect(result.output.trim()).toBe(String(process.platform === "win32" ? 65534 : process.getuid?.()))
           expect(yield* FSUtil.use.readFileString(path.join(tmp, "nvx-result.txt"))).toBe("legacy-ok")
         }),
       )

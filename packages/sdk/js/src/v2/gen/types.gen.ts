@@ -1889,6 +1889,10 @@ export type AttachmentConfig = {
 export type Config = {
   $schema?: string
   shell?: string
+  /**
+   * Sandbox backend used for bash tool execution
+   */
+  sandbox?: false | ConfigV2SandboxNvx
   logLevel?: LogLevel
   server?: ServerConfig
   command?: {
@@ -3824,6 +3828,40 @@ export type SyncEventSessionNextRevertCommitted = {
       messageID: string
     }
   }
+}
+
+export type ConfigV2SandboxNetwork = {
+  address: string
+  egress?: "allow" | "deny"
+  allow?: Array<string>
+  deny?: Array<string>
+  host_loopback?: "allow" | "deny"
+  proxy?: string
+  forward?: Array<string>
+}
+
+export type ConfigV2SandboxNvx = {
+  backend: "nvx"
+  path: string
+  openvmm?: string
+  kernel?: string
+  initramfs?: string
+  mount?: string
+  shell?: string
+  memory_mib?: number
+  processors?: 1 | 2 | 4 | 8
+  hypervisor?: "auto" | "kvm" | "mshv" | "whp"
+  cpus?: string | false
+  performance_tuning?: boolean
+  snapshot?: boolean
+  startup_timeout?: number
+  uid?: number
+  gid?: number
+  pass_env?: Array<string>
+  environment?: {
+    [key: string]: string
+  }
+  network?: ConfigV2SandboxNetwork
 }
 
 export type ConfigV2ReferenceGit = {
